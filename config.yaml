@@ -1,0 +1,30 @@
+%YAML:1.0
+
+#Camera Calibration
+img_height: 480
+img_width: 752
+
+camMatrix: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [364.3552, 0.000, 364.58797, 
+          0.000, 371.6308, 233.69627, 
+          0.000, 0.000, 1.000]
+
+distCoeff: !!opencv-matrix
+   rows: 5
+   cols: 1
+   dt: d
+   data: [-0.2768, 0.069037, -1.896e-04, -0.758e-04, 0.007]
+
+#Marker Information 
+#0 for oldtype;1 for newtype
+MARKER_TYPE: 1
+#markersize for image calculating,unit:pixel
+MARKER_SIZE: 100
+#markersize in world,unit:mm
+MARKER_SIZE_WORLD: 500
+
+#Image Path
+IMAGE_DIR: "/media/wyb/Study/MyPaper/实验/0118/first/mynteye/left/"
