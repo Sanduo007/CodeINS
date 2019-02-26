@@ -2,3 +2,5 @@ build/*
 .vscode/*
 *.m
 output/*
+*.txt
+src/PNP/*

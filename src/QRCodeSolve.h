@@ -24,16 +24,21 @@ class QRCodeSolve
 
 	cv::Size2f markerSize;
 	cv::Size2f markerSizeinWorld;
+	int markertype;
 
 	cv::Mat camMatrix;
 	cv::Mat distCoeff;
 
-	cv::Mat originimg;
+	cv::Mat camMatrix2;
+	cv::Mat distCoeff2;
+
+	cv::Mat originimg, previmg;
 	cv::Mat m_Mask;
+	std::vector<cv::Point2f> pre_pts;
 	int img_height;
 	int img_width;
 
-	int imgthr[7] = {227, 207, 187, 167, 147, 127, 107};
+	int imgthr[9] = {247, 227, 207, 187, 167, 147, 127, 107, 87};
 
 	//
 	FILE *results, *errorimg;
@@ -47,8 +52,9 @@ class QRCodeSolve
 
   public:
 	//输入图像路径和输出文件路径
-	QRCodeSolve(char imgdir_[1000], char outputdir_[1000], int cameratype, int markertype, cv::Size2f markerSize_ = cv::Size2f(100.0, 100.0), cv::Size2f markerSizeinWorld_ = cv::Size2f(500.0, 500.0));
+	QRCodeSolve(std::string config_path, char outputdir_[1000]);
 	~QRCodeSolve();
+	void readpara(std::string config_path);
 	//获取两点间距离
 	template <typename T>
 	double getdist(T pointa, T pointb);
@@ -59,12 +65,16 @@ class QRCodeSolve
 
 	void warpPerspectivePoints(std::vector<cv::Point2f> src, std::vector<cv::Point2f> &dst, cv::Mat M);
 	void getintercorners(cv::Mat img, Marker &m, std::vector<cv::Point2f> &intercorners);
-	void estiMatePosition(std::vector<Marker> &detectedMarkers, GPSTIME gpst);
-	bool markerDetection(cv::Mat img, GPSTIME gpst);
-	bool CalVar(Eigen::Matrix3f R_cw, Eigen::Vector3f T_wc, Eigen::Vector3f P_w, std::vector<cv::Point3f> allworldcorners3d, std::vector<cv::Point2f> allcorners);
+	bool estiMatePosition(std::vector<Marker> &detectedMarkers, double gpst);
+	bool markerDetection(cv::Mat img, double gpst);
+	bool CalVar(Eigen::Matrix3d R_cw, Eigen::Vector3d T_wc, Eigen::Vector3d P_w, std::vector<cv::Point3d> allworldcorners3d, std::vector<cv::Point2f> allcorners);
 	bool cv2double(const cv::Mat Rvec, const cv::Mat Tvec);
 
 	void optimize(std::vector<cv::Point2f> allcorners, std::vector<cv::Point3f> allworldcorners3d);
+	void NED2BLH(Eigen::Vector3d origBLH, Eigen::Vector3d NED, Eigen::Vector3d &calBLH);
+
+	void distortion(const Eigen::Vector2d &p_u, Eigen::Vector2d &d_u);
+	bool m_undistortPoints(std::vector<cv::Point2f> points, std::vector<cv::Point2f> &points_un);
 	//int getimgindex();
 };
 

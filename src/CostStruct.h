@@ -25,6 +25,7 @@ struct REPROJECT_COST
 
         residuals[0] = up - T(observed_norm_u);
         residuals[1] = vp - T(observed_norm_v);
+        //LOG(INFO) << "0: " << residuals[0] << " 1: " << residuals[1];
         return true;
     }
 

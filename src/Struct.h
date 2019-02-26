@@ -6,7 +6,8 @@
 enum camera_type
 {
 	GUIDANCE = 0,
-	X3 = 1
+	X3 = 1,
+	MYNTEYE = 2
 };
 enum Marker_type
 {
