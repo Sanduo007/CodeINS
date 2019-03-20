@@ -1,9 +1,10 @@
 #include "Marker.h"
 #include "Struct.h"
 #include "QRCodeSolve.h"
+#include "tic_toc.h"
+#include "Utility.h"
+#include <iomanip>
 using namespace cv;
-
-#define MYNT
 
 int main(int argc, char **argv)
 {
@@ -14,76 +15,58 @@ int main(int argc, char **argv)
 	Mat img;
 	FILE *fimgbin;
 
-	MyTime mytime;
-	char imgname[50] = {'\0'};
-	char imgpath[1000] = {'\0'};
-	char imgindexpath[1000] = {'\0'};
-	char indexbuff[1000] = {'\0'};
-	std::vector<Marker> detectedM;
-
-#ifdef MYNT
-	std::vector<std::vector<double>> allimu;
 	std::vector<double> allimg_timestmp;
 	double imgstamp;
-	double epoch[7] = {0.0};
+	QRCodeSolve qrcodesolver("/home/wyb/wyb/CodeINS/config.yaml", "/home/wyb/wyb/CodeINS/output/");
 
-	fimgbin = fopen("/media/wyb/Study/MyPaper/实验/0118/first/mynteye/left/imggpst.bin", "rb");
-	while (!feof(fimgbin))
+	/*get timestamp file*/
+	std::string timestamppath = qrcodesolver.imgdir_str + std::string("timestamp.bin");
+	fimgbin = fopen(timestamppath.c_str(), "rb");
+	if (fimgbin == NULL)
 	{
-		fread((void *)&imgstamp, sizeof(double), 1, fimgbin);
+		std::cout << "cannot open timestamp file!" << std::endl;
+		return 1;
+	}
+	while (fread((void *)&imgstamp, sizeof(double), 1, fimgbin)) //don't use feof any more
+	{
 		allimg_timestmp.push_back(imgstamp);
 	}
 	fclose(fimgbin);
-	QRCodeSolve qrcodesolver = QRCodeSolve("/home/wyb/wyb/CodeINS/config.yaml", "/home/wyb/wyb/CodeINS/output/");
 
-	int i = 0;
-
-	while (allimg_timestmp.size())
+	/*get imgname list*/
+	std::vector<std::string> imglist = Utility::getFiles(qrcodesolver.imgdir_str);
+	if (imglist.size() != allimg_timestmp.size())
 	{
-		qrcodesolver.imgindex = i++;
-		std::stringstream ss; //studied from mynteye SDK
-		ss << qrcodesolver.imgdir << std::dec << std::setw(6) << std::setfill('0') << i << ".png";
+		std::cout << "Fatal err: img nums != timestamp nums."
+				  << "img_num: " << imglist.size() << " time_num " << allimg_timestmp.size() << std::endl;
+		return 0;
+	}
+	TicToc tictoc;
 
-		img = imread(ss.str(), CV_LOAD_IMAGE_GRAYSCALE);
+	for (int i = 0, iend = imglist.size(); i < iend; ++i)
+	{
+		qrcodesolver.imgindex = i;
+		std::string imgname = imglist[i];
 
+		img = imread(qrcodesolver.imgdir_str + imgname, CV_LOAD_IMAGE_GRAYSCALE);
 		if (img.empty())
 		{
-			std::cout << "empty" << std::endl;
+			std::cout << "No img: " << qrcodesolver.imgdir_str + imgname << std::endl;
 			break;
 		}
+		imshow("img", img);
+		waitKey(1);
 		std::cout << "-------------img" << qrcodesolver.imgindex << "--------------" << std::endl;
-		qrcodesolver.markerDetection(img, allimg_timestmp[0]);
-		allimg_timestmp.erase(allimg_timestmp.begin());
-	}
-	//std::cout << allimg_timestmp.size() << std::endl;
-#else
-
-	QRCodeSolve qrcodesolver = QRCodeSolve("/media/wyb/Study/MyPaper/prepaper/ExperienceData/0822/OutputFiles20180822190151/",
-										   "/home/wyb/wyb/CodeINS/output/", GUIDANCE, OLDMARKER);
-
-	sprintf(imgindexpath, "%s%s", qrcodesolver.imgdir, "realtime.txt");
-
-	f_imgindex = fopen(imgindexpath, "r");
-	int k = sizeof(indexbuff);
-
-	while (fgets(indexbuff, sizeof(indexbuff), f_imgindex))
-	{
-		sscanf(indexbuff, "%d %d %d %d %d %lf\n", &qrcodesolver.imgindex, &mytime.min, &mytime.sec, &mytime.msec, &gpst.Week, &gpst.SecOfWeek);
-		sprintf(imgname, "image%d.jpg", qrcodesolver.imgindex);
-		sprintf(imgpath, "%s%s", qrcodesolver.imgdir, imgname);
-		if (qrcodesolver.imgindex == 1484)
+		if (qrcodesolver.imgindex == 1540)
 		{
-			int hhh = 0;
+			int kk = 0;
 		}
-		img = imread(imgpath, CV_LOAD_IMAGE_GRAYSCALE);
-		//imshow("image", img);
-		//waitKey(1);
-		std::cout << "-------------img" << qrcodesolver.imgindex << "--------------" << std::endl;
-		qrcodesolver.markerDetection(img, gpst);
-	}
-#endif
 
+		tictoc.tic();
+		qrcodesolver.markerDetection(img, allimg_timestmp[i]);
+		std::cout << tictoc.toc() << " ms used for all" << std::endl;
+	}
+	img.release();
 	cvDestroyAllWindows();
-	//google::ShutdownGoogleLogging();
 	return 1;
 }

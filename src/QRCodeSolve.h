@@ -10,6 +10,8 @@
 
 #include <eigen3/Eigen/Core>
 #include <ceres/ceres.h>
+#include <fstream>
+
 class QRCodeSolve
 {
   private:
@@ -25,6 +27,7 @@ class QRCodeSolve
 	cv::Size2f markerSize;
 	cv::Size2f markerSizeinWorld;
 	int markertype;
+	Eigen::Vector3d origBLH;
 
 	cv::Mat camMatrix;
 	cv::Mat distCoeff;
@@ -40,11 +43,13 @@ class QRCodeSolve
 
 	int imgthr[9] = {247, 227, 207, 187, 167, 147, 127, 107, 87};
 
-	//
-	FILE *results, *errorimg;
+	std::ofstream results, errorimg;
+	std::string evaluate_file_dir;
+	std::ifstream evaluatefile;
+	std::ofstream evaluate_outfile, time_info;
 
   public:
-	char imgdir[1000];
+	std::string imgdir_str;
 	int imgindex = 0;
 
 	double Q_wc[4] = {0.0, 0.0, 0.0, 0.0};
@@ -52,7 +57,7 @@ class QRCodeSolve
 
   public:
 	//输入图像路径和输出文件路径
-	QRCodeSolve(std::string config_path, char outputdir_[1000]);
+	QRCodeSolve(std::string config_path, std::string outputdir_);
 	~QRCodeSolve();
 	void readpara(std::string config_path);
 	//获取两点间距离
@@ -71,10 +76,11 @@ class QRCodeSolve
 	bool cv2double(const cv::Mat Rvec, const cv::Mat Tvec);
 
 	void optimize(std::vector<cv::Point2f> allcorners, std::vector<cv::Point3f> allworldcorners3d);
-	void NED2BLH(Eigen::Vector3d origBLH, Eigen::Vector3d NED, Eigen::Vector3d &calBLH);
 
 	void distortion(const Eigen::Vector2d &p_u, Eigen::Vector2d &d_u);
 	bool m_undistortPoints(std::vector<cv::Point2f> points, std::vector<cv::Point2f> &points_un);
+	bool m_caljacobian(Eigen::Matrix3d R_wcEg, Eigen::Vector3d T_wcEg, std::vector<cv::Point3f> allworldcorners3d, Eigen::MatrixXd &m_rjacobianEg, Eigen::MatrixXd &m_tjacobianEg);
+	bool evaluatePOSE(std::vector<Marker> &detectedMarkers, double gpst);
 	//int getimgindex();
 };
 

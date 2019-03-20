@@ -1,6 +1,7 @@
 #include <time.h>
 #include <ceres/ceres.h>
 
+#include <omp.h>
 #include <opencv2/core/eigen.hpp>
 
 #include "Marker.h"
@@ -8,29 +9,25 @@
 #include "Struct.h"
 #include "QRCodeSolve.h"
 #include "CostStruct.h"
-#include "PNP/epnp.h"
+#include "Utility.h"
+#include "tic_toc.h"
+
+#define EVALUATE
 
 using namespace std;
 using namespace cv;
 
-QRCodeSolve::QRCodeSolve(string config_path, char outputdir_[1000])
+QRCodeSolve::QRCodeSolve(string config_path, string outputdir_)
 {
 	readpara(config_path);
 
-	char stime[32] = {'\0'};
-	char filename[100] = {'\0'};
-	char filepath[1000] = {'\0'};
-	char errorimgname[100] = {'\0'};
-	char errorimgpath[1000] = {'\0'};
+	char stime[32];
+
 	double blockside2d = 0.0;
 	double blockside3d = 0.0;
 	Point2f temppoint(0.0, 0.0);
 	time_t tt = time(0);
-	int shep = strftime(stime, sizeof(stime), "%Y%m%d%H%M%S", localtime(&tt)); //get current UTC time
-	sprintf(filename, "%s%s%s", "POSEResults", stime, ".txt");
-	sprintf(filepath, "%s%s", outputdir_, filename);
-	sprintf(errorimgname, "%s%s%s", "errorimg", stime, ".txt");
-	sprintf(errorimgpath, "%s%s", outputdir_, errorimgname);
+	int shep = strftime(stime, sizeof(stime), "%Y%m%d%H%M", localtime(&tt)); //get current UTC time
 
 	m_markerCorners3d.push_back(Point3f(-markerSizeinWorld.width / 2.0, -markerSizeinWorld.height / 2.0, 0));
 	m_markerCorners3d.push_back(Point3f(markerSizeinWorld.width / 2.0, -markerSizeinWorld.height / 2.0, 0)); //（右下里）
@@ -102,14 +99,23 @@ QRCodeSolve::QRCodeSolve(string config_path, char outputdir_[1000])
 			m_markerinterCorners3d.push_back(Point3f(temppoint.x, temppoint.y, 0.0));
 		}
 	}
-
-	results = fopen(filepath, "w+");
-	errorimg = fopen(errorimgpath, "w+");
-
-	if (results == NULL || errorimg == NULL)
+#ifdef EVALUATE
+	evaluatefile.open(evaluate_file_dir);
+	evaluate_outfile.open(imgdir_str + "evaluate_outfile.txt");
+	if (!evaluatefile.is_open())
 	{
-		printf("create file failed!\n");
+		std::cout << "Open Evaluate File ERROR!" << std::endl;
 	}
+#else
+	results.open(imgdir_str + "POSEResultsRyaw_noransac" + string(stime) + ".txt"); // = fopen(string(imgdir_str) + string(filename), "w+");
+	errorimg.open(outputdir_ + "errorimg" + string(stime) + ".txt");				//= fopen(string(outputdir_) + string(errorimgname), "w+");
+	time_info.open(imgdir_str + "TimeInfo.txt");
+	if (!results.is_open() || !errorimg.is_open() || !time_info.is_open())
+	{
+		std::cout << "create file failed!" << std::endl;
+	}
+#endif
+
 	// if (cameratype == GUIDANCE)
 	// {
 	// 	//old_version
@@ -145,6 +151,8 @@ QRCodeSolve::QRCodeSolve(string config_path, char outputdir_[1000])
 }
 void QRCodeSolve::readpara(string config_path)
 {
+
+	double B, L, H;
 	cv::FileStorage fsSettings(config_path, cv::FileStorage::READ);
 	if (!fsSettings.isOpened())
 	{
@@ -166,16 +174,22 @@ void QRCodeSolve::readpara(string config_path)
 
 	markerSizeinWorld.height = fsSettings["MARKER_SIZE_WORLD"];
 	markerSizeinWorld.width = fsSettings["MARKER_SIZE_WORLD"];
+	B = fsSettings["MARKER_POS_B"];
+	L = fsSettings["MARKER_POS_L"];
+	H = fsSettings["MARKER_POS_H"];
+	origBLH = Eigen::Vector3d(B, L, H);
 
-	std::string imgdir_str;
 	fsSettings["IMAGE_DIR"] >> imgdir_str;
-	strcpy(imgdir, imgdir_str.c_str());
+	// strcpy(imgdir, imgdir_str.c_str());
+
+	fsSettings["EVALUATE_FILE_DIR"] >> evaluate_file_dir;
 }
 
 QRCodeSolve::~QRCodeSolve()
 {
-	fclose(results);
-	fclose(errorimg);
+	results.close();
+	errorimg.close();
+	evaluatefile.close();
 
 	originimg.release();
 	previmg.release();
@@ -330,6 +344,11 @@ bool QRCodeSolve::markerDetection(Mat img, double gpst)
 	// cv::imshow("undistort img4", img4);
 	// cv::waitKey(1);
 
+	// Mat edge, edgeshow;
+	// Canny(img, edge, 3, 9);
+	// imshow("edge", edge);
+	// waitKey(1);
+
 	Mat imgdebug;
 	img.copyTo(imgdebug);
 	std::vector<cv::Point2f> cur_pts;
@@ -348,22 +367,14 @@ bool QRCodeSolve::markerDetection(Mat img, double gpst)
 		//cv::imshow("LK", imgdebug);
 		//waitKey(1);
 	}
-
-	//
-	//
-	//
-	//
-	//
-	//
-	//
-
 	Mat imgByMory;
 	Mat imgByAdptThr;
 	vector<Marker> detectedMarkers;
 	vector<vector<Point>> contours;
 
 	img.copyTo(originimg);
-
+	TicToc findcode;
+	findcode.tic();
 	for (int k = 0; k < 9; k++) //梯度全局阈值
 	{
 		cv::threshold(img, imgByAdptThr, imgthr[k], 255, THRESH_BINARY);
@@ -401,8 +412,14 @@ bool QRCodeSolve::markerDetection(Mat img, double gpst)
 			detectMarkers(imgByMory, detectedMarkers); //二值化和形态学处理之后找信息
 			if (detectedMarkers.size())
 			{
+				time_info << findcode.toc();
+#ifdef EVALUATE
+				evaluatePOSE(detectedMarkers, gpst);
+#else
 				if (!estiMatePosition(detectedMarkers, gpst))
 					continue;
+#endif
+
 				if (k != 0)
 					rotate(imgthr, imgthr + k, imgthr + k + 1);
 				return true;
@@ -478,13 +495,16 @@ void QRCodeSolve::getintercorners(Mat img, Marker &m, vector<Point2f> &intercorn
 	Mat M = getPerspectiveTransform(m_markerCorners2d, m.points);
 	warpPerspectivePoints(m_markerinterCorners2d, perspintercorners, M);
 	m_Mask = cv::Mat(img_height, img_width, CV_8UC1, cv::Scalar(0));
-	for (int i = 0; i < m_Mask.rows; i++)
+#pragma omp parallel
 	{
-		for (int j = 0; j < m_Mask.cols; j++)
+		for (int i = 0; i < m_Mask.rows; i++)
 		{
-			if (pointPolygonTest(m.points, Point2f(j, i), false) == 1)
+			for (int j = 0; j < m_Mask.cols; j++)
 			{
-				m_Mask.at<uchar>(i, j) = 255;
+				if (pointPolygonTest(m.points, Point2f(j, i), false) == 1)
+				{
+					m_Mask.at<uchar>(i, j) = 255;
+				}
 			}
 		}
 	}
@@ -728,7 +748,22 @@ bool QRCodeSolve::m_undistortPoints(vector<Point2f> points, vector<Point2f> &poi
 	}
 	return true;
 }
+bool QRCodeSolve::m_caljacobian(Eigen::Matrix3d R_wcEg, Eigen::Vector3d T_wcEg, vector<Point3f> allworldcorners3d, Eigen::MatrixXd &m_rjacobianEg, Eigen::MatrixXd &m_tjacobianEg)
+{
+	Eigen::Vector3d Pc, Pw, tmp;
+	Eigen::Matrix3d camMatEg;
+	cv2eigen(camMatrix, camMatEg);
+	for (int i = 0; i < allworldcorners3d.size(); i++)
+	{
+		//cv2eigen(allworldcorners3d[i], Pw);
+		Pw << allworldcorners3d[i].x, allworldcorners3d[i].y, allworldcorners3d[i].z;
+		Pc = R_wcEg * Pw + T_wcEg;
 
+		m_tjacobianEg.block(2 * i, 0, 2, 3) = (1.0 / (Pc.tail<1>())(0) * camMatEg).block<2, 3>(0, 0);
+		m_rjacobianEg.block(2 * i, 0, 2, 3) = ((1.0 / (Pc.tail<1>())(0) * camMatEg).topRows<2>() * Utility::skewSymmetric(R_wcEg * Pw)).block<2, 3>(0, 0);
+	}
+	return true;
+}
 bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double gpst)
 {
 	vector<Point2f> intercorners, allcorners, allcorners_undis, m_allcorners_undis,
@@ -741,8 +776,8 @@ bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double 
 	double reproject_err = 0.0;
 	double optm_reproject_err = 0.0;
 	Eigen::Vector3d Euler;
-	Eigen::Matrix3d R_wcEg, R_cw, R_bw, R_wn; //rotate matrix from world to camera !欧拉角的定义
-	Eigen::Vector3d P_w, T_wcEg, P_n;		  //the Marker's center in UAVbody coor ,which is parelled with camera coor.transformation from world to camera,Eigen
+	Eigen::Matrix3d R_wcEg, R_cw, R_bw, R_wn, R_bc; //rotate matrix from world to camera !欧拉角的定义
+	Eigen::Vector3d P_w, T_wcEg, P_n;				//the Marker's center in UAVbody coor ,which is parelled with camera coor.transformation from world to camera,Eigen
 	Mat_<float> rotMat(3, 3);
 	Mat rgbimg;
 
@@ -751,11 +786,14 @@ bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double 
 	double cx = camMatrix.at<double>(0, 2);
 	double cy = camMatrix.at<double>(1, 2);
 
+	TicToc getcorners;
+	getcorners.tic();
 	getintercorners(originimg, m, intercorners);
+	time_info << " " << getcorners.toc();
 
-	allcorners.insert(allcorners.end(), m.points.begin(), m.points.end()); //matched points pair for calculating
+	//allcorners.insert(allcorners.end(), m.points.begin(), m.points.end()); //matched points pair for calculating
 	allcorners.insert(allcorners.end(), intercorners.begin(), intercorners.end());
-	allworldcorners3d.insert(allworldcorners3d.end(), m_markerCorners3d.begin(), m_markerCorners3d.end());
+	//allworldcorners3d.insert(allworldcorners3d.end(), m_markerCorners3d.begin(), m_markerCorners3d.end());
 	allworldcorners3d.insert(allworldcorners3d.end(), m_markerinterCorners3d4cal.begin(), m_markerinterCorners3d4cal.end());
 
 	m_undistortPoints(allcorners, m_allcorners_undis);
@@ -766,43 +804,50 @@ bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double 
 	for (int i = 0; i < allcorners.size(); i++)
 	{
 		allcorners_norm.push_back(cv::Point2f((allcorners_undis[i].x - cx) / fx, (allcorners_undis[i].y - cy) / fy)); //归一化角点
-		//circle(rgbimg, allcorners[i], 3, Scalar(0, 0, 255), -1, 0);
+		circle(rgbimg, allcorners[i], 1.5, Scalar(0, 255, 0), -1, 0);
 		deltapoint.push_back(allcorners_undis[i] - m_allcorners_undis[i]);
 	}
 
 	vector<int> inliers;
-	//solvePnP(allworldcorners3d, allcorners_undis, camMatrix, cv::noArray(), raux, taux, false, SOLVEPNP_ITERATIVE);
+	solvePnP(allworldcorners3d, allcorners_undis, camMatrix, cv::noArray(), raux, taux, false, SOLVEPNP_ITERATIVE);
+	//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%solvePnPRansac (option)
+	// {
+	// 	TicToc solve;
+	// 	solve.tic();
+	// 	solvePnPRansac(allworldcorners3d, allcorners_undis, camMatrix, cv::noArray(), raux, taux, false, 100, 1.0, 0.99, inliers, SOLVEPNP_ITERATIVE);
+	// 	time_info << " " << solve.toc() << endl;
+	// 	if (inliers.size() < 4)
+	// 	{
+	// 		m_markerinterCorners3d4cal.clear();
+	// 		return false;
+	// 	}
 
-	{
-		solvePnPRansac(allworldcorners3d, allcorners_undis, camMatrix, cv::noArray(), raux, taux, false, 100, 1.0, 0.99, inliers, SOLVEPNP_ITERATIVE);
-		if (inliers.size() < 4)
-		{
-			m_markerinterCorners3d4cal.clear();
-			return false;
-		}
-
-		for (int i = 0; i < inliers.size(); i++) //use inlier points to recize all points vectors
-		{
-			allcorners_undis[i] = allcorners_undis[inliers[i]];   //去畸变的角点
-			allworldcorners3d[i] = allworldcorners3d[inliers[i]]; //原始的角点的3d坐标
-			allcorners_norm[i] = allcorners_norm[inliers[i]];	 //去畸变后归一化的角点
-			circle(rgbimg, allcorners[inliers[i]], 1.5, Scalar(0, 255, 0), -1, 0);
-		}
-		allcorners_undis.resize(inliers.size());
-		allworldcorners3d.resize(inliers.size());
-		allcorners_norm.resize(inliers.size());
-		LOG_IF(INFO, inliers.size() < 10) << "inliers " << inliers.size();
-	}
-	m_markerinterCorners3d4cal.clear();																						//must,wyb
-	Eigen::MatrixXd covariance = Eigen::MatrixXd::Identity(allworldcorners3d.size() * 2, allworldcorners3d.size() * 2) * 2; //RANSAC之后的角点提取误差为一个像素
+	// 	for (int i = 0; i < inliers.size(); i++) //use inlier points to recize all points vectors
+	// 	{
+	// 		allcorners_undis[i] = allcorners_undis[inliers[i]];   //去畸变的角点
+	// 		allworldcorners3d[i] = allworldcorners3d[inliers[i]]; //原始的角点的3d坐标
+	// 		allcorners_norm[i] = allcorners_norm[inliers[i]];	 //去畸变后归一化的角点
+	// 		circle(rgbimg, allcorners[inliers[i]], 1.5, Scalar(0, 255, 0), -1, 0);
+	// 	}
+	// 	allcorners_undis.resize(inliers.size());
+	// 	allworldcorners3d.resize(inliers.size());
+	// 	allcorners_norm.resize(inliers.size());
+	// 	LOG_IF(INFO, inliers.size() < 10) << "inliers " << inliers.size();
+	// }
+	m_markerinterCorners3d4cal.clear(); //must,wyb
+	//Eigen::MatrixXd covariance = Eigen::MatrixXd::Identity(allworldcorners3d.size() * 2, allworldcorners3d.size() * 2); //RANSAC之后的角点提取误差为一个像素
+	Eigen::MatrixXd weight = Eigen::MatrixXd::Identity(allworldcorners3d.size() * 2, allworldcorners3d.size() * 2);
 
 	imshow("QRALLCorner", rgbimg);
 	waitKey(1);
-
+	imwrite(imgdir_str + "allcorner_noRANSAC/" + to_string(gpst) + ".png", rgbimg);
 	projectPoints(allworldcorners3d, raux, taux, camMatrix, cv::noArray(), allcorners_repro, jacobian); //df/dr,df/dt,......(imagepoints)
-	for (int j = 0; j < allcorners_undis.size(); j++)													//都是有畸变的点,优化之前的重投影误差
+	Eigen::VectorXd reproj_d(allworldcorners3d.size() * 2);
+	for (int j = 0; j < allcorners_undis.size(); j++) //都是有畸变的点,优化之前的重投影误差
 	{
 		reproject_err += (sqrt((allcorners_undis[j].x - allcorners_repro[j].x) * (allcorners_undis[j].x - allcorners_repro[j].x) / fx / fx + (allcorners_undis[j].y - allcorners_repro[j].y) * (allcorners_undis[j].y - allcorners_repro[j].y) / fy / fy) / inliers.size());
+		reproj_d.segment<2>(2 * j) = Eigen::Vector2d(allcorners_undis[j].x - allcorners_repro[j].x, allcorners_undis[j].y - allcorners_repro[j].y);
+		//covariance.block<2, 2>(2 * (j - 1), 2 * (j - 1)) = reproj_d.asDiagonal();
 	}
 
 	raux.convertTo(Rvec, CV_32F); //旋转向量
@@ -810,10 +855,8 @@ bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double 
 	cv2double(Rvec, Tvec);
 	cout << "Q_wc: " << Q_wc[0] << " " << Q_wc[1] << " " << Q_wc[2] << " " << Q_wc[3] << endl;
 	cout << "T_wc: " << T_wc[0] << " " << T_wc[1] << " " << T_wc[2] << endl;
-	LOG(INFO) << "Q_wc: " << Q_wc[0] << " " << Q_wc[1] << " " << Q_wc[2] << " " << Q_wc[3];
-	LOG(INFO) << "T_wc: " << T_wc[0] << " " << T_wc[1] << " " << T_wc[2];
 
-	/*//ceres优化
+	/*//ceres优化 option
 	optimize(allcorners_norm, allworldcorners3d); //nolinear optimization,Q_wc & T_wc已有初值
 	double optmrvec[3] = {0.0};
 	Q2Rvec(Q_wc, optmrvec);
@@ -837,40 +880,66 @@ bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double 
 
 	//推导，蒋师兄，最小二乘.观测值的方差为单位阵，所以这里等价
 	//finalcov = (fulljacobian.transpose() * fulljacobian).inverse() * fulljacobian.transpose() * covariance * fulljacobian * (fulljacobian.transpose() * fulljacobian).inverse();
-	finalcov = (fulljacobian.transpose() * covariance.inverse() * fulljacobian).inverse();
+	finalcov = (fulljacobian.transpose() * weight * fulljacobian).inverse();
+	Eigen::VectorXd deltax = (fulljacobian.transpose() * fulljacobian).inverse() * fulljacobian.transpose() * reproj_d;
 	LOG(INFO) << "fulljacobian\n"
 			  << fulljacobian;
 	LOG(INFO) << "finalcov\n"
 			  << finalcov;
-
+	LOG(INFO) << "deltax:\n"
+			  << deltax;
+	LOG(INFO) << "reproj_d:\n"
+			  << reproj_d;
 	raux.convertTo(Rvec, CV_32F); //旋转向量，最终输出（可输出ceres优化前后的结果）
 	taux.convertTo(Tvec, CV_32F); //平移向量
 	Rodrigues(Rvec, rotMat);
 	cv2eigen(rotMat, R_wcEg);
 	cv2eigen(Tvec, T_wcEg);
+	{
+		Eigen::MatrixXd m_rjacobian(allcorners_undis.size() * 2, 3);
+		Eigen::MatrixXd m_tjacobian(allcorners_undis.size() * 2, 3);
+		m_caljacobian(R_wcEg, T_wcEg, allworldcorners3d, m_rjacobian, m_tjacobian);
+		Eigen::MatrixXd m_fulljacobian(allcorners_undis.size() * 2, 6);
+		Eigen::MatrixXd m_finalcov; //方差阵
+		m_fulljacobian.leftCols<3>() = m_rjacobian;
+		m_fulljacobian.rightCols<3>() = m_tjacobian;
+		m_finalcov = (m_fulljacobian.transpose() * weight * m_fulljacobian).inverse();
+		Eigen::VectorXd m_deltax = (m_fulljacobian.transpose() * m_fulljacobian).inverse() * m_fulljacobian.transpose() * reproj_d;
+		LOG(INFO) << "m_fulljacobian\n"
+				  << m_fulljacobian;
+		LOG(INFO) << "m_finalcov\n"
+				  << m_finalcov;
+		LOG(INFO) << "m_deltax:\n"
+				  << m_deltax;
+	}
 
 	R_cw = R_wcEg.transpose();
+	//since the world coordinate is not orthometric with th NED,we must compensate the yaw angle
+	Eigen::Vector3d Eul_R_wn(0.0, 0.0, 90 - 4.5083); //calibrate from data_09
+	Eigen::Vector3d Eul_R_bc(-0.723, 0.546, -86.984);
+	Utility::Eul2DCM(Eul_R_wn, R_wn);
+	Utility::Eul2DCM(Eul_R_bc, R_bc);
 
 	P_w = -R_cw * T_wcEg / 1000.0;
-	Euler[0] = atan2(R_cw(2, 1), R_cw(2, 2)) * RAD2DEG;												  //roll,ref:Niu's PPT
-	Euler[1] = atan2(-R_cw(2, 0), sqrt(R_cw(2, 1) * R_cw(2, 1) + R_cw(2, 2) * R_cw(2, 2))) * RAD2DEG; //pitch
-	Euler[2] = atan2(R_cw(1, 0), R_cw(0, 0)) * RAD2DEG;												  //yaw
+	Eigen::Matrix3d R_bn = R_wn * R_cw * R_bc; //cal euler must transform to Cbn
+	Utility::DCM2Eul(R_bn, Euler);
+
 	if (abs(P_w[2] / 1000.0) > 5)
 	{
 		printf("%dOutlier\n", imgindex);
 	}
-	Eigen::Vector3d origBLH(0.532810211116742, 1.995886165630296, 22.366768037761343); //origin point of code coordinate
 	Eigen::Vector3d calBLH;
-	R_wn << 0, -1, 0,
-		1, 0, 0,
-		0, 0, 1;
-	P_n = R_wn * P_w;
-	NED2BLH(origBLH, P_n, calBLH);
 
+	P_n = R_wn * P_w;
+	Utility::NED2BLH(origBLH, P_n, calBLH);
+	cout << setprecision(10) << "estimate:  " << gpst << "\n"
+		 << "calBLH:\n"
+		 << calBLH << "\nEuler\n"
+		 << Euler << "\nR_cw\n"
+		 << R_cw << endl;
 	//方差的单位，姿态是弧度，位置是mm;定位结果经纬度的单位是弧度，姿态的单位是度.二维码坐标系和北东地坐标系差了九十度
-	// fprintf(results, "%f %.10f %.10f %f %f %f %f %lf %lf %lf %lf %lf %lf\n", gpst,
-	// 		calBLH[0], calBLH[1], calBLH[2], Euler[0], Euler[1], Euler[2], finalcov.diagonal()[3], finalcov.diagonal()[4], finalcov.diagonal()[5], finalcov.diagonal()[0], finalcov.diagonal()[1], finalcov.diagonal()[2]);
-	fprintf(results, "%f %.10f %.10f %.10f %.10f %.10f %.10f %d\n", gpst, calBLH[0] * RAD2DEG, calBLH[1] * RAD2DEG, calBLH[2], sqrt(finalcov.diagonal()[4]), sqrt(finalcov.diagonal()[3]), sqrt(finalcov.diagonal()[5]), inliers.size());
+
+	results << setprecision(10) << fixed << gpst << " " << calBLH[0] * RAD2DEG << " " << calBLH[1] * RAD2DEG << " " << calBLH[2] << " " << abs(deltax[4]) * 1000 << " " << abs(deltax[3]) * 1000 << " " << abs(deltax[5]) * 1000 << " " << Euler[0] << " " << Euler[1] << " " << Euler[2] << endl;
 
 	pre_pts.clear();
 	pre_pts = allcorners; //留作下一帧光流追踪
@@ -878,14 +947,92 @@ bool QRCodeSolve::estiMatePosition(std::vector<Marker> &detectedMarkers, double 
 	originimg.copyTo(previmg); //这个地方两个mat直接相等会有问题！！！！！程序没运行到这里会给mat赋值，（直接相等是浅拷贝，两个mat会共用一处空间）
 	return true;
 }
-void QRCodeSolve::NED2BLH(Eigen::Vector3d origBLH, Eigen::Vector3d NED, Eigen::Vector3d &calBLH)
+
+bool QRCodeSolve::evaluatePOSE(std::vector<Marker> &detectedMarkers, double gpst)
 {
-	Eigen::Matrix3d Drinv = Eigen::Matrix3d::Zero();
-	double Rm, Rn;
-	Rm = a_WGS84 * (1 - e2) / pow(1 - e2 * sin(origBLH[0]) * sin(origBLH[0]), 1.5);
-	Rn = a_WGS84 / sqrt(1 - e2 * sin(origBLH[0]) * sin(origBLH[0]));
-	Drinv(0, 0) = 1 / (Rm + origBLH[2]);
-	Drinv(1, 1) = 1 / (Rn + origBLH[2]) / cos(origBLH[0]);
-	Drinv(2, 2) = -1;
-	calBLH = Drinv * NED + origBLH;
+	const int length = 1024;
+	double gpssow;
+	double mean_err = 0.0;
+	char camPOSE[length]; //export imu POSE to camPOSE by GINS
+	Eigen::Vector3d camBLH, T_wc, T_cw, P_c, P_n, P_w, P_ctmp, Euler;
+	Eigen::Matrix3d R_cn, R_cw, camMatrixEg, R_bn, R_wn, R_cb, R_bc;
+	vector<Eigen::Vector3d> allworldcorners3d, allwordcorners3d_reproj, allcorners3d, deltapoints;
+	Eigen::Vector3d Eul_R_wn(0.0, 0.0, 90 - 4.5083);
+	Eigen::Vector3d Eul_R_bc(-0.723, 0.546, -86.984);
+	Utility::Eul2DCM(Eul_R_wn, R_wn);
+	Utility::Eul2DCM(Eul_R_bc, R_bc);
+	R_cb = R_bc.inverse();
+	Eigen::Matrix3d R_nw;
+	R_nw = R_wn.inverse();
+
+	while (evaluatefile.getline(camPOSE, length))
+	{
+		char *ptr;
+		ptr = strtok(camPOSE, " ");
+		double gpsweek = strtod(ptr, NULL);
+		ptr = strtok(NULL, " ");
+		gpssow = strtod(ptr, NULL);
+		if (abs(gpssow - gpst) <= 0.01)
+		{
+			ptr = strtok(NULL, " ");
+			camBLH[0] = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			camBLH[1] = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			camBLH[2] = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			double Vn = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			double Ve = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			double Vd = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			Euler[0] = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			Euler[1] = strtod(ptr, NULL);
+			ptr = strtok(NULL, " ");
+			Euler[2] = strtod(ptr, NULL);
+
+			Utility::Eul2DCM(Euler, R_bn);			//Cbn
+			R_cw = R_nw * R_bn * R_cb;				//for pose from pure visual
+			Utility::BLH2NED(origBLH, camBLH, P_n); //P_n(cam coors in ned)
+			T_cw = R_nw * P_n;						//P_w(cam coors in world) = T_cw
+			T_wc = -R_cw.inverse() * T_cw;
+
+			Marker m = detectedMarkers[0];
+			cv2eigen(camMatrix, camMatrixEg);
+
+			for (int i = 0; i < m.points.size(); i++)
+			{
+
+				Eigen::Vector3d tmp_3(m.points[i].x, m.points[i].y, 1);
+				Eigen::Vector3d tmp_2(m_markerCorners3d[i].x, m_markerCorners3d[i].y, m_markerCorners3d[i].z);
+
+				allworldcorners3d.push_back(tmp_2);
+				allcorners3d.push_back(tmp_3);
+			}
+
+			for (int i = 0; i < allworldcorners3d.size(); i++)
+			{
+				P_c = R_cw.inverse() * 0.001 * allworldcorners3d[i] + T_wc;
+				P_ctmp = P_c[2] * camMatrixEg.inverse() * allcorners3d[i];
+				P_w = R_cw * P_ctmp + T_cw;
+				allwordcorners3d_reproj.push_back(P_w);
+				deltapoints.push_back(0.001 * allworldcorners3d[i] - P_w);
+				mean_err += (0.001 * allworldcorners3d[i] - P_w).norm();
+			}
+			evaluate_outfile << setprecision(6) << fixed << gpst << " " << mean_err / 4.0 << endl;
+			cout << "mean_err " << mean_err / 4.0 << endl;
+			cout << setprecision(10) << "evaluate:  " << gpssow << "\n"
+				 << "camBLH:\n"
+				 << camBLH << "\nEuler\n"
+				 << Euler << "\nR_cw\n"
+				 << R_cw << endl;
+			break;
+		}
+		else if (gpssow > gpst)
+			return false;
+	}
+
+	return true;
 }
