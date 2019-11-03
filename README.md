@@ -1,2 +1,2 @@
 # CodeINS
-2D Code and INS aided positioning
+2D barcode marker based pose estimation
