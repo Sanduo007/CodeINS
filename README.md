@@ -1,2 +1,2 @@
 # CodeINS
-2D barcode marker based pose estimation
+An artificial marker based pose estimation solution for UAV landing.
